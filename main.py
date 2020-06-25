@@ -1,127 +1,220 @@
-import telegram
-import time
-from telegram.ext import Updater
-from telegram.ext import CommandHandler
-from telegram.ext import MessageHandler, Filters, ConversationHandler, RegexHandler
-from telegram import ChatAction
-import logging
-from functools import wraps
+import requests
 import random
-import dictionary
+import time
 
+import telegram
+from telegram import ReplyKeyboardMarkup
+from telegram import ChatAction, ReplyKeyboardRemove
+from telegram.ext import (Updater, CommandHandler, MessageHandler, Filters, ConversationHandler, PicklePersistence)
+
+import logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-
 logger = logging.getLogger(__name__)
 
-ACTION, ANSWER = range(2)
+TYPING_CHOICE, LANGUAGE= range(2)
 
-words = dictionary.words
-type = dictionary.type
-description = dictionary.description
 
-correct_word = 0
+#for translation API
+url = "https://systran-systran-platform-for-language-processing-v1.p.rapidapi.com/resources/dictionary/lookup"
+headers = {
+    'x-rapidapi-host': "systran-systran-platform-for-language-processing-v1.p.rapidapi.com",
+    'x-rapidapi-key': "###Key###"
+    }
+#for flag function
+OFFSET = 127462 - ord('A')
 
-def start(bot, update):
-    bot.send_chat_action(chat_id=update.message.chat_id, action = telegram.ChatAction.TYPING)
-    time.sleep(1)
-    custom_keyboard = [['Learn new words'], ['Check yourself']]
-    reply_markup = telegram.ReplyKeyboardMarkup(custom_keyboard, one_time_keyboard=False)
-    bot.send_message(chat_id=update.message.chat_id, text="What do you want to do?", reply_markup=reply_markup)
-    return ACTION
+lang_keyboard = [['English', 'French'], ['German', 'Spanish'], ['Russian', 'Dutch']]
+action_keyboard = [['Add new word'], ['Change language'], ['Show all words'], ['Train me!'], ['Help!']]
 
-def action(bot, update):
-    if(update.message.text == 'Learn new words'):
-        learn(bot, update)
-    elif(update.message.text == 'Check yourself'):
-        num = generate_correct_answer()
-        global correct_word 
-        correct_word = num
-        correct_num = random.randint(1, 4)
-        first_incorrect = words[random.randint(1, len(words) - 1)]
-        second_incorrect = words[random.randint(1, len(words) - 1)]
-        third_incorrect = words[random.randint(1, len(words) - 1)]
-        if(correct_num == 1):
-            custom_keyboard=[[words[correct_word]], [first_incorrect], 
-            [second_incorrect], [third_incorrect]]
-        elif(correct_num == 2):
-            custom_keyboard=[[first_incorrect], [words[correct_word]], 
-            [second_incorrect], [third_incorrect]]
-        elif(correct_num == 3):
-            custom_keyboard=[[first_incorrect], [second_incorrect], 
-            [words[correct_word]], [third_incorrect]]
-        elif(correct_num == 4):
-            custom_keyboard=[[first_incorrect], [second_incorrect], 
-            [third_incorrect], [words[correct_word]]]
-        reply_markup = telegram.ReplyKeyboardMarkup(custom_keyboard, one_time_keyboard=False)
-        bot.send_message(chat_id=update.message.chat_id, text=description[correct_word], reply_markup=reply_markup)
-        return ANSWER
+langs = ['english', 'french','german', 'spanish','russian','dutch']
+langs_code = {'english':'en', 'french':'fr','german':'de', 'spanish':'es','russian':'ru','dutch':'nl'}
 
-def generate_correct_answer():
-    num = random.randint(1, len(words) - 1)
-    return num
+markup = ReplyKeyboardMarkup(lang_keyboard, one_time_keyboard=True)
+def flags(code):
+    code = code.upper()
+    return chr(ord(code[0]) + OFFSET) + chr(ord(code[1]) + OFFSET)
+def change_lang(update, context):
+    update.message.reply_text('Alright, choose a new language!', reply_markup = markup)
+    return LANGUAGE
+def facts_to_str(user_data):
+    facts = list()
+    for key, value in user_data.items():
+        facts.append('{} - {}'.format(key, value))
 
-def get_correct_word():
-    return correct_word
+    return "\n".join(facts).join(['\n', '\n'])
+def keep_typing(last, chat, action):
+    now = time.time()
+    if (now - last) > 1:
+        chat.send_action(action)
+    return now
 
-def answer_check(bot, update):
-    correct_word = get_correct_word()
-    custom_keyboard = [['Learn new words'], ['Check yourself']]
-    reply_markup = telegram.ReplyKeyboardMarkup(custom_keyboard, one_time_keyboard=False)
-    if(update.message.text == words[correct_word]):
-        bot.send_chat_action(chat_id=update.message.chat_id , action = telegram.ChatAction.TYPING)
-        bot.send_message(chat_id=update.message.chat_id, text="*Correct!*", parse_mode=telegram.ParseMode.MARKDOWN)
-        bot.send_message(chat_id=update.message.chat_id, text="What do you want to do?", reply_markup=reply_markup)
-        return ACTION
-    else:
-        bot.send_chat_action(chat_id=update.message.chat_id , action = telegram.ChatAction.TYPING)
-        bot.send_message(chat_id=update.message.chat_id, text="*Incorrect!*" + " Correct answer is: " + words[correct_word], parse_mode=telegram.ParseMode.MARKDOWN)
-        bot.send_message(chat_id=update.message.chat_id, text="What do you want to do?", reply_markup=reply_markup)
-        return ACTION
-
-def learn(bot, update):
-    num = random.randint(1, len(words) - 1)
-    bot.send_chat_action(chat_id=update.message.chat_id , action = telegram.ChatAction.TYPING)
-    time.sleep(1)
-    bot.send_message(chat_id=update.message.chat_id, text="*"+ words[num]+"* - "+description[num]+"\n"+"\n_"+type[num]+"_", parse_mode=telegram.ParseMode.MARKDOWN)
-    bot.send_message(chat_id=update.message.chat_id, text="What is next?")
-
-def cancel(bot, update):
-    return ConversationHandler.END
-
-def send_action(action):
-    def decorator(func):
-        @wraps(func)
-        def command_func(*args, **kwargs):
-            bot, update = args
-            bot.send_chat_action(chat_id=update.effective_message.chat_id, action=action)
-            return func(bot, update, **kwargs)
-        return command_func
+def searching(response, input, current_lang, mode):
+    text1 = eval(response.text.replace('false', '0').replace('true', '1'))['outputs'][0]['output']['matches'] 
+    output = ''
+    if mode == 0:
+        for el in text1:
+            output += ", ".join([smth['lemma'] for smth  in el['targets']]) + ', '
+        output = output[:-2]
+        output += ' '  
+    elif mode == 1:
+        for el in text1:
+            output += '\n\n' + el['source']['pos'] + ':\n'
+            output += ", ".join([smth['lemma'] for smth  in el['targets']])
+        output += ' '   
     
-    return decorator
+    elif mode==2:
+        if current_lang == 'english':
+            transcription = str(text1[0]['source']['phonetic'])
+            output = '\n' + transcription + '\n'
+        else:
+            output = ''
+        for l1 in text1:
+            output += '\n<b>' + l1['source']['pos'] + '</b> :\n- '
+            output += ", ".join([smth['lemma'] for smth  in l1['targets']]) +'\n'
+            output += ("-- Expressions --\n<i>")
+            for l3 in ([l2['expressions'] for l2  in l1['targets']]):
+                if not l3 == []:
+                    output += ("\n".join([( l4['source']+ ' - ' + l4['target'] + ';') for l4  in l3]))
+                    output += '\n'
+            output += '</i> '   
+    return output
 
-def error(bot, update, error):
-    logger.warning('Update "%s" caused error "%s"', update, error)
+def start(update, context):
+    update.message.reply_text("Hi! I'm going to collect and translate all words you wanna save.")
+    update.message.reply_text("Default language for transaltion is english. For translating english words - russian")
+    if context.user_data:
+        reply_text = "You already told me some words. Why don't you tell me something more?"
+    else:
+        reply_text = "First of all choose the language you are learning!\nDon't worry, you can change it anytime ;)"
+    update.message.reply_text(reply_text, reply_markup=markup)
+    for lan in langs:
+        if lan not in context.user_data:
+            context.user_data[lan] = {}
+    return LANGUAGE
+
+def regular_choice_lang(update, context):
+    text = update.message.text.lower()
+    context.user_data['current_lang'] = text
+    reply_text = 'Nice! Your language is {} now. To change it use /change. Now add some words!'.format(text)
+    markup = ReplyKeyboardMarkup(action_keyboard, one_time_keyboard=True)
+    update.message.reply_text(reply_text, reply_markup = markup)
+    return TYPING_CHOICE
+
+def no_lang(update, context):
+    reply_text = 'Sorry, your language is {} not in our list yet. You have to choose language before you start working!'.format(text)
+    update.message.reply_text(reply_text, reply_markup = markup)
+    return LANGUAGE
+
+def regular_choice(update, context):
+    last = 0
+    text = update.message.text.lower()
+    context.user_data['choice'] = text
+    current_lang = context.user_data['current_lang'] 
+    if current_lang == 'english':
+        target = 'ru'
+        flag = flags('gb')
+    else:
+        target = 'en'
+        flag = flags(langs_code[current_lang])
+    last = keep_typing(last, update.effective_chat, ChatAction.TYPING)
+    if context.user_data[current_lang].get(text):
+        reply_text = 'You know this one already! \n' +  flag + ' <b>'+ text +'</b> - ' + context.user_data[current_lang][text] + '\n /more - to know more'
+    else:
+        querystring = {"source":langs_code[current_lang],"target":target,"input":text}
+        response = requests.request("GET", url, headers=headers, params=querystring)
+        if response.text == "{\"outputs\":[{\"output\":{}}]}":
+            reply_text = 'Hmmm... Can\'t find \'{}\'. Are you sure it\'s spelled right? Try again!'.format(text)
+        else:
+            context.user_data[current_lang][text] = searching(response, text,current_lang, 0)
+            reply_text = flag + ' <b>'+ text +'</b> - ' + searching(response, text, current_lang, 0) + '\n /more - to know more'
+
+    update.message.reply_text(reply_text, quote = True, parse_mode=telegram.ParseMode.HTML)
+
+    return TYPING_CHOICE
+
+def more(update, context):
+    text = context.user_data['choice'] 
+    current_lang = context.user_data['current_lang'] 
+    if current_lang == 'english':
+        target = 'ru'
+    else:
+        target = 'en'
+    querystring = {"source":langs_code[current_lang],"target":target,"input":text}
+    response = requests.request("GET", url, headers=headers, params=querystring)
+    reply_text = searching(response, text, current_lang, 2)
+    update.message.reply_text(reply_text, quote = True, parse_mode=telegram.ParseMode.HTML)
+
+    return TYPING_CHOICE
+
+def adding(update, context):
+    update.message.reply_text("Just type them here! It's that simple")
+    return TYPING_CHOICE
+
+def show_data(update, context):
+    if context.user_data[context.user_data['current_lang']]=={}:
+        update.message.reply_text("You don't have words for this language yet\n")
+    else:
+        update.message.reply_text("This is what you already told me from {} language:\n"
+                                "{}"
+                              "\nYou can tell me more, or change the language /change".format(context.user_data['current_lang'], facts_to_str(context.user_data[context.user_data['current_lang']])))
+    return TYPING_CHOICE
+
+def show_random_word(update, context):
+    if context.user_data[context.user_data['current_lang']]=={}:
+        update.message.reply_text("You don't have words for this language yet\n")
+    else:
+        rand_word = str(random.sample(list(context.user_data[context.user_data['current_lang']]), 1)[0])
+        update.message.reply_text("The word you should remind today from {} language is:\n"
+                              "{} - {}" .format(context.user_data['current_lang'], rand_word, str(context.user_data[context.user_data['current_lang']][rand_word])))
+    return TYPING_CHOICE
+
+def help_m(update, context):
+    update.message.reply_text('This is bot for storing and translating words!\n'
+                              '\n/change - to change the language'
+                              '\n/show_all - to show all words of a current language'
+                              '\n/more - to find out more about your words'
+                              '\n/remind_me - to get random word of a current language')
+    return TYPING_CHOICE
+
+def error(update, context):
+    """Log Errors caused by Updates."""
+    logger.warning('Update "%s" caused error "%s"', update, context.error)
+
 
 def main():
-    updater = Updater(token='###TOKEN###')
-
-    dispatcher = updater.dispatcher
-
+    # Create the Updater and pass it your bot's token.
+    pp = PicklePersistence(filename='conversationbot')
+    updater = Updater("###Token###", persistence=pp, use_context=True)
+    # Get the dispatcher to register handlers
+    dp = updater.dispatcher
+    # Add conversation handler with the states CHOOSING, TYPING_CHOICE and TYPING_REPLY
     conv_handler = ConversationHandler(
-        entry_points = [CommandHandler('start', start)],
-
-        states = {
-            ACTION: [RegexHandler('^(Learn new words|Check yourself)$', action)],
-            ANSWER: [MessageHandler(Filters.text, answer_check)]
+        entry_points=[CommandHandler('start', start)],
+        states={
+            TYPING_CHOICE: [CommandHandler('change', change_lang),
+                            CommandHandler('more', more),
+                            CommandHandler('show_all', show_data),
+                            CommandHandler('remind_me', show_random_word),
+                            CommandHandler('help', help_m),
+                            CommandHandler('cancel', change_lang),
+                            MessageHandler(Filters.regex('^(Change language)$'), change_lang),
+                            MessageHandler(Filters.regex('^(Show all words)$'), show_data),
+                            MessageHandler(Filters.regex('^(Train me!)$'), show_random_word),
+                            MessageHandler(Filters.regex('^(Help!)$'), help_m),
+                            MessageHandler(Filters.regex('^(Add new word)$'), adding),
+                            MessageHandler(Filters.text, regular_choice),  
+                            ],
+            LANGUAGE: [MessageHandler(Filters.regex('^(English|French|German|Spanish|Russian|Ukrainian|Dutch)$'), regular_choice_lang),
+                       MessageHandler(Filters.text, no_lang) ],
         },
-
-        fallbacks=[CommandHandler('cancel', cancel)]
+        fallbacks=[CommandHandler('cancel', change_lang)],
+        name="my_conversation",
+        persistent=True
     )
-
-    dispatcher.add_handler(conv_handler)
-
-    dispatcher.add_error_handler(error)
-    
+    dp.add_handler(conv_handler)
+    show_data_handler = CommandHandler('show_data', show_data)
+    dp.add_handler(show_data_handler)
+    dp.add_error_handler(error)
     updater.start_polling()
     updater.idle()
 
